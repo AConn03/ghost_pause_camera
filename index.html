@@ -165,7 +165,6 @@
         // Audio/Video proxy variables for gapless recording
         let audioCtx, audioDest, audioSource;
         let finalStream;
-        let isDrawing = false;
 
         function stopCurrentCamera() {
             if (stream) {
@@ -232,8 +231,17 @@
                 rCtx.fillStyle = 'black';
                 rCtx.fillRect(0, 0, recordingCanvas.width, recordingCanvas.height);
                 
-                // Record the true orientation, ignoring live view mirroring for the final file
-                rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
+                // CRITICAL FIX: If the UI is mirrored, actually flip the pixels on the recording canvas
+                // so the final downloaded video contains the flipped footage.
+                if (isLiveViewMirrored) {
+                    rCtx.save();
+                    rCtx.translate(recordingCanvas.width, 0);
+                    rCtx.scale(-1, 1);
+                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
+                    rCtx.restore();
+                } else {
+                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
+                }
             }
             requestAnimationFrame(renderLoop);
         }
@@ -292,11 +300,8 @@
 
         pauseBtn.addEventListener('click', () => {
             if (mediaRecorder.state === 'recording') {
-                // If the live view is mirrored, we must manually flip the 
-                // captured ghost frame to match what the user is seeing.
                 if (isLiveViewMirrored) {
                     oCtx.save();
-                    // Flip the context horizontally before drawing the frame
                     oCtx.translate(overlayCanvas.width, 0);
                     oCtx.scale(-1, 1);
                     oCtx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
@@ -342,7 +347,6 @@
             document.body.removeChild(a);
         });
 
-        // Auto hide UI logic
         function resetUIHideTimer() {
             controlsOverlay.style.opacity = '1';
             controlsOverlay.style.pointerEvents = 'auto';
@@ -358,7 +362,6 @@
         window.addEventListener('mousemove', resetUIHideTimer);
         window.addEventListener('touchstart', resetUIHideTimer);
 
-        // Boot up
         initCamera();
         requestAnimationFrame(renderLoop);
         resetUIHideTimer();
