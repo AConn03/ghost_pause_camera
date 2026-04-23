@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Multi-Camera Recorder with Ghost Frame</title>
+    <title>Seamless Multi-Camera Recorder</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -21,6 +21,7 @@
             height: 100%;
         }
 
+        /* Live Preview and Ghost Overlay */
         #liveVideo, #overlayCanvas {
             position: absolute;
             top: 0;
@@ -31,10 +32,21 @@
             transition: transform 0.3s ease;
         }
 
+        /* Hidden canvas used to bypass stream-stopping limitations */
+        #recordingCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            pointer-events: none;
+            z-index: -10; 
+        }
+
         #overlayCanvas {
             opacity: 0.5;
             display: none; 
             pointer-events: none;
+            z-index: 5;
         }
 
         .mirrored { transform: scaleX(-1); }
@@ -83,7 +95,7 @@
         #stopBtn { background-color: #F44336; color: white; }
         #downloadBtn { background-color: #2196F3; color: white; }
         #mirrorBtn { background-color: #ffffff; color: #000; }
-        #switchCamBtn { background-color: #9C27B0; color: white; } /* Purple button */
+        #switchCamBtn { background-color: #9C27B0; color: white; }
 
         .status {
             font-size: 0.9rem;
@@ -98,7 +110,10 @@
 
     <div class="video-container">
         <video id="liveVideo" autoplay playsinline muted></video>
+        
         <canvas id="overlayCanvas"></canvas>
+        
+        <canvas id="recordingCanvas"></canvas>
         
         <div id="controlsOverlay" class="controls-overlay">
             <div class="status" id="statusText">Camera ready.</div>
@@ -116,9 +131,12 @@
     <script>
         const videoElement = document.getElementById('liveVideo');
         const overlayCanvas = document.getElementById('overlayCanvas');
-        const ctx = overlayCanvas.getContext('2d');
-        const controlsOverlay = document.getElementById('controlsOverlay');
+        const oCtx = overlayCanvas.getContext('2d');
         
+        const recordingCanvas = document.getElementById('recordingCanvas');
+        const rCtx = recordingCanvas.getContext('2d', { willReadFrequently: true });
+        
+        const controlsOverlay = document.getElementById('controlsOverlay');
         const startBtn = document.getElementById('startBtn');
         const pauseBtn = document.getElementById('pauseBtn');
         const stopBtn = document.getElementById('stopBtn');
@@ -132,11 +150,13 @@
         let stream;
         let finalVideoUrl = null;
         let hideTimeout;
-        
-        // Default to front-facing camera
         let currentFacingMode = "user"; 
+        
+        // Audio/Video proxy variables
+        let audioCtx, audioDest, audioSource;
+        let finalStream;
+        let isDrawing = false;
 
-        // --- Camera Initialization & Management ---
         function stopCurrentCamera() {
             if (stream) {
                 stream.getTracks().forEach(track => track.stop());
@@ -144,82 +164,101 @@
         }
 
         async function initCamera() {
-            stopCurrentCamera(); // Stop old tracks before starting new ones
+            stopCurrentCamera();
             
             try {
                 stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        width: { ideal: 1920 }, 
-                        height: { ideal: 1080 },
-                        facingMode: currentFacingMode 
-                    }, 
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: currentFacingMode }, 
                     audio: true 
                 });
                 videoElement.srcObject = stream;
+
+                // --- AUDIO PROXY SETUP ---
+                // We route the camera's audio through an AudioContext so it doesn't break when we swap cameras
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    audioDest = audioCtx.createMediaStreamDestination();
+                }
+                if (audioSource) audioSource.disconnect();
+                audioSource = audioCtx.createMediaStreamSource(stream);
+                audioSource.connect(audioDest);
                 
                 videoElement.onloadedmetadata = () => {
-                    overlayCanvas.width = videoElement.videoWidth;
-                    overlayCanvas.height = videoElement.videoHeight;
+                    // Only resize canvases if we are NOT currently recording. 
+                    // Changing canvas size mid-recording breaks the WebM file.
+                    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+                        recordingCanvas.width = videoElement.videoWidth;
+                        recordingCanvas.height = videoElement.videoHeight;
+                        overlayCanvas.width = videoElement.videoWidth;
+                        overlayCanvas.height = videoElement.videoHeight;
+                    }
+
+                    // --- VIDEO PROXY SETUP ---
+                    if (!finalStream) {
+                        // Capture the video from the hidden canvas at 30FPS
+                        const canvasStream = recordingCanvas.captureStream(30); 
+                        // Combine canvas video with our persistent audio destination
+                        finalStream = new MediaStream([
+                            canvasStream.getVideoTracks()[0],
+                            audioDest.stream.getAudioTracks()[0]
+                        ]);
+                    }
+
+                    if (currentFacingMode === "user") {
+                        videoElement.classList.add('mirrored');
+                        overlayCanvas.classList.add('mirrored');
+                    } else {
+                        videoElement.classList.remove('mirrored');
+                        overlayCanvas.classList.remove('mirrored');
+                    }
+
+                    statusText.innerText = `Camera ready (${currentFacingMode === 'user' ? 'Front' : 'Rear'}).`;
                 };
 
-                // Auto-adjust mirror effect based on camera type
-                if (currentFacingMode === "user") {
-                    videoElement.classList.add('mirrored');
-                    overlayCanvas.classList.add('mirrored');
-                } else {
-                    videoElement.classList.remove('mirrored');
-                    overlayCanvas.classList.remove('mirrored');
-                }
-
-                statusText.innerText = `Camera ready (${currentFacingMode === 'user' ? 'Front' : 'Rear'}).`;
-                statusText.style.color = "#ffffff";
-
             } catch (err) {
-                console.error("Camera error: ", err);
-                statusText.innerText = "Camera access denied or unavailable.";
-                statusText.style.color = "#F44336";
+                statusText.innerText = "Camera access denied.";
             }
         }
 
-        // --- Camera Switch Toggle ---
-        switchCamBtn.addEventListener('click', () => {
-            // Disable button briefly to prevent rapid clicking from crashing the camera
-            switchCamBtn.disabled = true;
-            statusText.innerText = "Switching cameras...";
-            
-            currentFacingMode = currentFacingMode === "user" ? "environment" : "user";
-            initCamera().then(() => {
-                switchCamBtn.disabled = false;
-            });
-        });
-
-        // --- Auto-Hide Controls Logic ---
-        function resetUIHideTimer() {
-            controlsOverlay.style.opacity = '1';
-            controlsOverlay.style.pointerEvents = 'auto';
-            clearTimeout(hideTimeout);
-            
-            hideTimeout = setTimeout(() => {
-                // Only hide if we are currently recording to allow users to interact with menus
-                if (mediaRecorder && mediaRecorder.state === 'recording') {
-                    controlsOverlay.style.opacity = '0';
-                    controlsOverlay.style.pointerEvents = 'none';
+        // --- RENDER ENGINE ---
+        // Continuously copy the live camera to the hidden recording canvas
+        function renderLoop() {
+            if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+                // Fill black background
+                rCtx.fillStyle = 'black';
+                rCtx.fillRect(0, 0, recordingCanvas.width, recordingCanvas.height);
+                
+                // Draw the video frame. If the UI is mirrored, we must mirror the recording canvas too.
+                if (videoElement.classList.contains('mirrored')) {
+                    rCtx.save();
+                    rCtx.translate(recordingCanvas.width, 0);
+                    rCtx.scale(-1, 1);
+                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
+                    rCtx.restore();
+                } else {
+                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
                 }
-            }, 3000);
+            }
+            requestAnimationFrame(renderLoop);
         }
 
-        window.addEventListener('mousemove', resetUIHideTimer);
-        window.addEventListener('touchstart', resetUIHideTimer);
-        window.addEventListener('click', resetUIHideTimer);
+        // --- CONTROLS ---
+        switchCamBtn.addEventListener('click', () => {
+            switchCamBtn.disabled = true;
+            statusText.innerText = "Switching cameras...";
+            currentFacingMode = currentFacingMode === "user" ? "environment" : "user";
+            initCamera().then(() => { switchCamBtn.disabled = false; });
+        });
 
-        // --- Mirror Toggle Logic ---
         mirrorBtn.addEventListener('click', () => {
             videoElement.classList.toggle('mirrored');
             overlayCanvas.classList.toggle('mirrored');
         });
 
-        // --- Recording Logic ---
         startBtn.addEventListener('click', () => {
+            // Wake up audio context in case the browser suspended it
+            if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
             if (finalVideoUrl) {
                 window.URL.revokeObjectURL(finalVideoUrl);
                 finalVideoUrl = null;
@@ -227,14 +266,12 @@
             recordedChunks = [];
             
             try {
-                mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+                mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/webm; codecs=vp9' });
             } catch (e) {
-                mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/mp4' }); 
+                mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/mp4' }); 
             }
 
-            mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) recordedChunks.push(e.data);
-            };
+            mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
 
             mediaRecorder.onstop = () => {
                 const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
@@ -242,16 +279,14 @@
                 
                 downloadBtn.disabled = false;
                 startBtn.disabled = false;
-                switchCamBtn.disabled = false; // Re-enable camera switching
                 startBtn.innerText = "Re-Record";
                 statusText.innerText = "Recording stopped. Ready to download.";
-                resetUIHideTimer(); // Force UI back on
+                resetUIHideTimer();
             };
 
             mediaRecorder.start();
 
             startBtn.disabled = true;
-            switchCamBtn.disabled = true; // Prevent switching while recording
             pauseBtn.disabled = false;
             stopBtn.disabled = false;
             downloadBtn.disabled = true;
@@ -262,12 +297,13 @@
 
         pauseBtn.addEventListener('click', () => {
             if (mediaRecorder.state === 'recording') {
-                ctx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
+                // Grab ghost frame to UI canvas
+                oCtx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
                 overlayCanvas.style.display = 'block';
                 mediaRecorder.pause();
                 
                 pauseBtn.innerText = "Resume";
-                statusText.innerText = "Paused. Overlaying last frame.";
+                statusText.innerText = "Paused. Switch cameras or align shot.";
                 statusText.style.color = "#FFC107";
                 
             } else if (mediaRecorder.state === 'paused') {
@@ -284,7 +320,6 @@
         stopBtn.addEventListener('click', () => {
             mediaRecorder.stop();
             overlayCanvas.style.display = 'none';
-            
             pauseBtn.disabled = true;
             pauseBtn.innerText = "Pause";
             stopBtn.disabled = true;
@@ -292,21 +327,34 @@
 
         downloadBtn.addEventListener('click', () => {
             if (!finalVideoUrl) return;
-            
             const a = document.createElement('a');
             a.style.display = 'none';
             a.href = finalVideoUrl;
-            a.download = `recording-${Date.now()}.webm`; 
+            a.download = `seamless-recording-${Date.now()}.webm`; 
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            
-            statusText.innerText = "Video downloaded!";
-            statusText.style.color = "#2196F3";
         });
 
-        // Start
+        // Auto hide UI
+        function resetUIHideTimer() {
+            controlsOverlay.style.opacity = '1';
+            controlsOverlay.style.pointerEvents = 'auto';
+            clearTimeout(hideTimeout);
+            hideTimeout = setTimeout(() => {
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    controlsOverlay.style.opacity = '0';
+                    controlsOverlay.style.pointerEvents = 'none';
+                }
+            }, 3000);
+        }
+
+        window.addEventListener('mousemove', resetUIHideTimer);
+        window.addEventListener('touchstart', resetUIHideTimer);
+
+        // Boot up
         initCamera();
+        requestAnimationFrame(renderLoop); // Start the rendering engine
         resetUIHideTimer();
     </script>
 </body>
