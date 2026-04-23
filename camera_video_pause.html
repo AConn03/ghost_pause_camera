@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Full-Screen Recorder with Ghost Frame</title>
+    <style>
+        /* Reset and Full Screen Setup */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body, html {
+            width: 100vw;
+            height: 100vh;
+            background-color: #000;
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden; /* Prevent scrolling */
+        }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Live Camera - Object-fit cover ensures it fills the whole screen */
+        #liveVideo {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        /* Canvas Overlay - Matches video exact sizing and cropping */
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover; 
+            opacity: 0.5;
+            display: none; 
+            pointer-events: none;
+        }
+
+        /* Floating Controls Overlay */
+        .controls-overlay {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(8px);
+            padding: 1.2rem;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+            z-index: 10;
+            transition: opacity 0.4s ease;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 0.8rem;
+        }
+
+        button {
+            padding: 12px 20px;
+            font-size: 1rem;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s, opacity 0.2s, transform 0.1s;
+        }
+
+        button:active:not(:disabled) {
+            transform: scale(0.95);
+        }
+
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Button Colors */
+        #startBtn { background-color: #4CAF50; color: white; }
+        #pauseBtn { background-color: #FFC107; color: black; }
+        #stopBtn { background-color: #F44336; color: white; }
+        #downloadBtn { background-color: #2196F3; color: white; }
+
+        .status {
+            font-size: 0.9rem;
+            color: #ffffff;
+            font-weight: 500;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="video-container">
+        <video id="liveVideo" autoplay playsinline muted></video>
+        <canvas id="overlayCanvas"></canvas>
+        
+        <div id="controlsOverlay" class="controls-overlay">
+            <div class="status" id="statusText">Camera ready.</div>
+            <div class="button-group">
+                <button id="startBtn">Start</button>
+                <button id="pauseBtn" disabled>Pause</button>
+                <button id="stopBtn" disabled>Stop</button>
+                <button id="downloadBtn" disabled>Download</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('liveVideo');
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const ctx = overlayCanvas.getContext('2d');
+        const controlsOverlay = document.getElementById('controlsOverlay');
+        
+        const startBtn = document.getElementById('startBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusText = document.getElementById('statusText');
+
+        let mediaRecorder;
+        let recordedChunks = [];
+        let stream;
+        let finalVideoUrl = null;
+        let hideTimeout;
+
+        // --- Camera Initialization ---
+        async function initCamera() {
+            try {
+                // Request high resolution for full screen
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: { ideal: 1920 }, height: { ideal: 1080 } }, 
+                    audio: true 
+                });
+                videoElement.srcObject = stream;
+                
+                // Match canvas internal resolution to video resolution
+                videoElement.onloadedmetadata = () => {
+                    overlayCanvas.width = videoElement.videoWidth;
+                    overlayCanvas.height = videoElement.videoHeight;
+                };
+            } catch (err) {
+                console.error("Camera error: ", err);
+                statusText.innerText = "Camera access denied.";
+                statusText.style.color = "#F44336";
+            }
+        }
+
+        // --- Auto-Hide Controls Logic ---
+        function resetUIHideTimer() {
+            // Show UI and allow clicks
+            controlsOverlay.style.opacity = '1';
+            controlsOverlay.style.pointerEvents = 'auto';
+            
+            clearTimeout(hideTimeout);
+            
+            // Hide UI after 3 seconds
+            hideTimeout = setTimeout(() => {
+                controlsOverlay.style.opacity = '0';
+                controlsOverlay.style.pointerEvents = 'none'; // Prevent invisible clicks
+            }, 3000);
+        }
+
+        // Trigger UI reveal on mouse movement, screen tap, or clicking anywhere
+        window.addEventListener('mousemove', resetUIHideTimer);
+        window.addEventListener('touchstart', resetUIHideTimer);
+        window.addEventListener('click', resetUIHideTimer);
+
+        // --- Recording Logic ---
+        startBtn.addEventListener('click', () => {
+            // Clean up previous recording if it exists
+            if (finalVideoUrl) {
+                window.URL.revokeObjectURL(finalVideoUrl);
+                finalVideoUrl = null;
+            }
+            recordedChunks = [];
+            
+            try {
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+            } catch (e) {
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/mp4' }); 
+            }
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) recordedChunks.push(e.data);
+            };
+
+            mediaRecorder.onstop = () => {
+                // When stopped, create the video file but DO NOT download yet
+                const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+                finalVideoUrl = URL.createObjectURL(blob);
+                
+                // Update UI for download/re-record state
+                downloadBtn.disabled = false;
+                startBtn.disabled = false;
+                startBtn.innerText = "Re-Record";
+                statusText.innerText = "Recording stopped. Ready to download or restart.";
+                statusText.style.color = "#ffffff";
+            };
+
+            mediaRecorder.start();
+
+            // Update UI
+            startBtn.disabled = true;
+            pauseBtn.disabled = false;
+            stopBtn.disabled = false;
+            downloadBtn.disabled = true;
+            statusText.innerText = "Recording...";
+            statusText.style.color = "#4CAF50";
+        });
+
+        pauseBtn.addEventListener('click', () => {
+            if (mediaRecorder.state === 'recording') {
+                // Draw current frame to canvas and show it
+                ctx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
+                overlayCanvas.style.display = 'block';
+                mediaRecorder.pause();
+                
+                pauseBtn.innerText = "Resume";
+                statusText.innerText = "Paused. Overlaying last frame.";
+                statusText.style.color = "#FFC107";
+                
+            } else if (mediaRecorder.state === 'paused') {
+                // Hide canvas and resume
+                overlayCanvas.style.display = 'none';
+                mediaRecorder.resume();
+                
+                pauseBtn.innerText = "Pause";
+                statusText.innerText = "Recording...";
+                statusText.style.color = "#4CAF50";
+            }
+        });
+
+        stopBtn.addEventListener('click', () => {
+            mediaRecorder.stop();
+            overlayCanvas.style.display = 'none'; // Ensure ghost frame goes away
+            
+            pauseBtn.disabled = true;
+            pauseBtn.innerText = "Pause";
+            stopBtn.disabled = true;
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            if (!finalVideoUrl) return;
+            
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = finalVideoUrl;
+            a.download = `recording-${Date.now()}.webm`; 
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            
+            statusText.innerText = "Video downloaded!";
+            statusText.style.color = "#2196F3";
+        });
+
+        // Start camera and initialize the UI timer immediately
+        initCamera();
+        resetUIHideTimer();
+    </script>
+</body>
+</html>
