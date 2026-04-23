@@ -3,21 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Full-Screen Recorder with Ghost Frame</title>
+    <title>Multi-Camera Recorder with Ghost Frame</title>
     <style>
-        /* Reset and Full Screen Setup */
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body, html {
             width: 100vw;
             height: 100vh;
             background-color: #000;
             font-family: system-ui, -apple-system, sans-serif;
-            overflow: hidden; /* Prevent scrolling */
+            overflow: hidden;
         }
 
         .video-container {
@@ -26,28 +21,24 @@
             height: 100%;
         }
 
-        /* Live Camera - Object-fit cover ensures it fills the whole screen */
-        #liveVideo {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            display: block;
-        }
-
-        /* Canvas Overlay - Matches video exact sizing and cropping */
-        #overlayCanvas {
+        #liveVideo, #overlayCanvas {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            object-fit: cover; 
+            object-fit: cover;
+            transition: transform 0.3s ease;
+        }
+
+        #overlayCanvas {
             opacity: 0.5;
             display: none; 
             pointer-events: none;
         }
 
-        /* Floating Controls Overlay */
+        .mirrored { transform: scaleX(-1); }
+
         .controls-overlay {
             position: absolute;
             bottom: 40px;
@@ -63,16 +54,20 @@
             gap: 1rem;
             z-index: 10;
             transition: opacity 0.4s ease;
+            width: 90%;
+            max-width: 500px;
         }
 
         .button-group {
             display: flex;
-            gap: 0.8rem;
+            gap: 0.6rem;
+            flex-wrap: wrap;
+            justify-content: center;
         }
 
         button {
-            padding: 12px 20px;
-            font-size: 1rem;
+            padding: 10px 14px;
+            font-size: 0.9rem;
             font-weight: bold;
             border: none;
             border-radius: 8px;
@@ -80,27 +75,22 @@
             transition: background-color 0.2s, opacity 0.2s, transform 0.1s;
         }
 
-        button:active:not(:disabled) {
-            transform: scale(0.95);
-        }
+        button:active:not(:disabled) { transform: scale(0.95); }
+        button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
-        button:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-            transform: none;
-        }
-
-        /* Button Colors */
         #startBtn { background-color: #4CAF50; color: white; }
         #pauseBtn { background-color: #FFC107; color: black; }
         #stopBtn { background-color: #F44336; color: white; }
         #downloadBtn { background-color: #2196F3; color: white; }
+        #mirrorBtn { background-color: #ffffff; color: #000; }
+        #switchCamBtn { background-color: #9C27B0; color: white; } /* Purple button */
 
         .status {
             font-size: 0.9rem;
             color: #ffffff;
             font-weight: 500;
             text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+            text-align: center;
         }
     </style>
 </head>
@@ -113,6 +103,8 @@
         <div id="controlsOverlay" class="controls-overlay">
             <div class="status" id="statusText">Camera ready.</div>
             <div class="button-group">
+                <button id="switchCamBtn">Switch Cam</button>
+                <button id="mirrorBtn">Flip View</button>
                 <button id="startBtn">Start</button>
                 <button id="pauseBtn" disabled>Pause</button>
                 <button id="stopBtn" disabled>Stop</button>
@@ -131,6 +123,8 @@
         const pauseBtn = document.getElementById('pauseBtn');
         const stopBtn = document.getElementById('stopBtn');
         const downloadBtn = document.getElementById('downloadBtn');
+        const mirrorBtn = document.getElementById('mirrorBtn');
+        const switchCamBtn = document.getElementById('switchCamBtn');
         const statusText = document.getElementById('statusText');
 
         let mediaRecorder;
@@ -138,52 +132,94 @@
         let stream;
         let finalVideoUrl = null;
         let hideTimeout;
+        
+        // Default to front-facing camera
+        let currentFacingMode = "user"; 
 
-        // --- Camera Initialization ---
+        // --- Camera Initialization & Management ---
+        function stopCurrentCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+        }
+
         async function initCamera() {
+            stopCurrentCamera(); // Stop old tracks before starting new ones
+            
             try {
-                // Request high resolution for full screen
                 stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: { ideal: 1920 }, height: { ideal: 1080 } }, 
+                    video: { 
+                        width: { ideal: 1920 }, 
+                        height: { ideal: 1080 },
+                        facingMode: currentFacingMode 
+                    }, 
                     audio: true 
                 });
                 videoElement.srcObject = stream;
                 
-                // Match canvas internal resolution to video resolution
                 videoElement.onloadedmetadata = () => {
                     overlayCanvas.width = videoElement.videoWidth;
                     overlayCanvas.height = videoElement.videoHeight;
                 };
+
+                // Auto-adjust mirror effect based on camera type
+                if (currentFacingMode === "user") {
+                    videoElement.classList.add('mirrored');
+                    overlayCanvas.classList.add('mirrored');
+                } else {
+                    videoElement.classList.remove('mirrored');
+                    overlayCanvas.classList.remove('mirrored');
+                }
+
+                statusText.innerText = `Camera ready (${currentFacingMode === 'user' ? 'Front' : 'Rear'}).`;
+                statusText.style.color = "#ffffff";
+
             } catch (err) {
                 console.error("Camera error: ", err);
-                statusText.innerText = "Camera access denied.";
+                statusText.innerText = "Camera access denied or unavailable.";
                 statusText.style.color = "#F44336";
             }
         }
 
+        // --- Camera Switch Toggle ---
+        switchCamBtn.addEventListener('click', () => {
+            // Disable button briefly to prevent rapid clicking from crashing the camera
+            switchCamBtn.disabled = true;
+            statusText.innerText = "Switching cameras...";
+            
+            currentFacingMode = currentFacingMode === "user" ? "environment" : "user";
+            initCamera().then(() => {
+                switchCamBtn.disabled = false;
+            });
+        });
+
         // --- Auto-Hide Controls Logic ---
         function resetUIHideTimer() {
-            // Show UI and allow clicks
             controlsOverlay.style.opacity = '1';
             controlsOverlay.style.pointerEvents = 'auto';
-            
             clearTimeout(hideTimeout);
             
-            // Hide UI after 3 seconds
             hideTimeout = setTimeout(() => {
-                controlsOverlay.style.opacity = '0';
-                controlsOverlay.style.pointerEvents = 'none'; // Prevent invisible clicks
+                // Only hide if we are currently recording to allow users to interact with menus
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    controlsOverlay.style.opacity = '0';
+                    controlsOverlay.style.pointerEvents = 'none';
+                }
             }, 3000);
         }
 
-        // Trigger UI reveal on mouse movement, screen tap, or clicking anywhere
         window.addEventListener('mousemove', resetUIHideTimer);
         window.addEventListener('touchstart', resetUIHideTimer);
         window.addEventListener('click', resetUIHideTimer);
 
+        // --- Mirror Toggle Logic ---
+        mirrorBtn.addEventListener('click', () => {
+            videoElement.classList.toggle('mirrored');
+            overlayCanvas.classList.toggle('mirrored');
+        });
+
         // --- Recording Logic ---
         startBtn.addEventListener('click', () => {
-            // Clean up previous recording if it exists
             if (finalVideoUrl) {
                 window.URL.revokeObjectURL(finalVideoUrl);
                 finalVideoUrl = null;
@@ -201,32 +237,31 @@
             };
 
             mediaRecorder.onstop = () => {
-                // When stopped, create the video file but DO NOT download yet
                 const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
                 finalVideoUrl = URL.createObjectURL(blob);
                 
-                // Update UI for download/re-record state
                 downloadBtn.disabled = false;
                 startBtn.disabled = false;
+                switchCamBtn.disabled = false; // Re-enable camera switching
                 startBtn.innerText = "Re-Record";
-                statusText.innerText = "Recording stopped. Ready to download or restart.";
-                statusText.style.color = "#ffffff";
+                statusText.innerText = "Recording stopped. Ready to download.";
+                resetUIHideTimer(); // Force UI back on
             };
 
             mediaRecorder.start();
 
-            // Update UI
             startBtn.disabled = true;
+            switchCamBtn.disabled = true; // Prevent switching while recording
             pauseBtn.disabled = false;
             stopBtn.disabled = false;
             downloadBtn.disabled = true;
             statusText.innerText = "Recording...";
             statusText.style.color = "#4CAF50";
+            resetUIHideTimer();
         });
 
         pauseBtn.addEventListener('click', () => {
             if (mediaRecorder.state === 'recording') {
-                // Draw current frame to canvas and show it
                 ctx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
                 overlayCanvas.style.display = 'block';
                 mediaRecorder.pause();
@@ -236,7 +271,6 @@
                 statusText.style.color = "#FFC107";
                 
             } else if (mediaRecorder.state === 'paused') {
-                // Hide canvas and resume
                 overlayCanvas.style.display = 'none';
                 mediaRecorder.resume();
                 
@@ -244,11 +278,12 @@
                 statusText.innerText = "Recording...";
                 statusText.style.color = "#4CAF50";
             }
+            resetUIHideTimer();
         });
 
         stopBtn.addEventListener('click', () => {
             mediaRecorder.stop();
-            overlayCanvas.style.display = 'none'; // Ensure ghost frame goes away
+            overlayCanvas.style.display = 'none';
             
             pauseBtn.disabled = true;
             pauseBtn.innerText = "Pause";
@@ -270,7 +305,7 @@
             statusText.style.color = "#2196F3";
         });
 
-        // Start camera and initialize the UI timer immediately
+        // Start
         initCamera();
         resetUIHideTimer();
     </script>
