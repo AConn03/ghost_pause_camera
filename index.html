@@ -21,7 +21,6 @@
             height: 100%;
         }
 
-        /* Live Preview for the user */
         #liveVideo {
             position: absolute;
             top: 0;
@@ -32,7 +31,6 @@
             transition: transform 0.3s ease;
         }
 
-        /* Ghost frame overlay (never CSS-mirrored) */
         #overlayCanvas {
             position: absolute;
             top: 0;
@@ -46,7 +44,6 @@
             z-index: 5;
         }
 
-        /* The hidden engine that drives the continuous recording */
         #recordingCanvas {
             position: absolute;
             top: 0;
@@ -117,9 +114,7 @@
 
     <div class="video-container">
         <video id="liveVideo" autoplay playsinline muted></video>
-        
         <canvas id="overlayCanvas"></canvas>
-        
         <canvas id="recordingCanvas"></canvas>
         
         <div id="controlsOverlay" class="controls-overlay">
@@ -130,7 +125,7 @@
                 <button id="startBtn">Start</button>
                 <button id="pauseBtn" disabled>Pause</button>
                 <button id="stopBtn" disabled>Stop</button>
-                <button id="downloadBtn" disabled>Download</button>
+                <button id="downloadBtn" disabled>Save Video</button>
             </div>
         </div>
     </div>
@@ -139,7 +134,6 @@
         const videoElement = document.getElementById('liveVideo');
         const overlayCanvas = document.getElementById('overlayCanvas');
         const oCtx = overlayCanvas.getContext('2d');
-        
         const recordingCanvas = document.getElementById('recordingCanvas');
         const rCtx = recordingCanvas.getContext('2d', { willReadFrequently: true });
         
@@ -155,26 +149,20 @@
         let mediaRecorder;
         let recordedChunks = [];
         let stream;
-        let finalVideoUrl = null;
+        let finalBlob = null; // Storing the actual Blob now
         let hideTimeout;
         let currentFacingMode = "user"; 
-        
-        // Track the current mirroring state of the live view
         let isLiveViewMirrored = false; 
 
-        // Audio/Video proxy variables for gapless recording
         let audioCtx, audioDest, audioSource;
         let finalStream;
 
         function stopCurrentCamera() {
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-            }
+            if (stream) stream.getTracks().forEach(track => track.stop());
         }
 
         async function initCamera() {
             stopCurrentCamera();
-            
             try {
                 stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: currentFacingMode }, 
@@ -182,7 +170,6 @@
                 });
                 videoElement.srcObject = stream;
 
-                // --- AUDIO PROXY SETUP ---
                 if (!audioCtx) {
                     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                     audioDest = audioCtx.createMediaStreamDestination();
@@ -199,7 +186,6 @@
                         overlayCanvas.height = videoElement.videoHeight;
                     }
 
-                    // --- VIDEO PROXY SETUP ---
                     if (!finalStream) {
                         const canvasStream = recordingCanvas.captureStream(30); 
                         finalStream = new MediaStream([
@@ -208,7 +194,6 @@
                         ]);
                     }
 
-                    // Set initial mirroring based on camera type (front camera is mirrored by default)
                     if (currentFacingMode === "user") {
                         isLiveViewMirrored = true;
                         videoElement.classList.add('mirrored');
@@ -219,20 +204,16 @@
 
                     statusText.innerText = `Camera ready (${currentFacingMode === 'user' ? 'Front' : 'Rear'}).`;
                 };
-
             } catch (err) {
                 statusText.innerText = "Camera access denied.";
             }
         }
 
-        // --- RENDER ENGINE ---
         function renderLoop() {
             if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
                 rCtx.fillStyle = 'black';
                 rCtx.fillRect(0, 0, recordingCanvas.width, recordingCanvas.height);
                 
-                // CRITICAL FIX: If the UI is mirrored, actually flip the pixels on the recording canvas
-                // so the final downloaded video contains the flipped footage.
                 if (isLiveViewMirrored) {
                     rCtx.save();
                     rCtx.translate(recordingCanvas.width, 0);
@@ -246,7 +227,6 @@
             requestAnimationFrame(renderLoop);
         }
 
-        // --- CONTROLS ---
         switchCamBtn.addEventListener('click', () => {
             switchCamBtn.disabled = true;
             statusText.innerText = "Switching cameras...";
@@ -261,29 +241,25 @@
 
         startBtn.addEventListener('click', () => {
             if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-
-            if (finalVideoUrl) {
-                window.URL.revokeObjectURL(finalVideoUrl);
-                finalVideoUrl = null;
-            }
+            finalBlob = null;
             recordedChunks = [];
             
             try {
                 mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/webm; codecs=vp9' });
             } catch (e) {
+                // iOS Safari fallback
                 mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/mp4' }); 
             }
 
             mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
 
             mediaRecorder.onstop = () => {
-                const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
-                finalVideoUrl = URL.createObjectURL(blob);
+                finalBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
                 
                 downloadBtn.disabled = false;
                 startBtn.disabled = false;
                 startBtn.innerText = "Re-Record";
-                statusText.innerText = "Recording stopped. Ready to download.";
+                statusText.innerText = "Ready to save!";
                 resetUIHideTimer();
             };
 
@@ -312,7 +288,6 @@
                 
                 overlayCanvas.style.display = 'block';
                 mediaRecorder.pause();
-                
                 pauseBtn.innerText = "Resume";
                 statusText.innerText = "Paused. Align your shot.";
                 statusText.style.color = "#FFC107";
@@ -320,7 +295,6 @@
             } else if (mediaRecorder.state === 'paused') {
                 overlayCanvas.style.display = 'none';
                 mediaRecorder.resume();
-                
                 pauseBtn.innerText = "Pause";
                 statusText.innerText = "Recording...";
                 statusText.style.color = "#4CAF50";
@@ -336,15 +310,40 @@
             stopBtn.disabled = true;
         });
 
-        downloadBtn.addEventListener('click', () => {
-            if (!finalVideoUrl) return;
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = finalVideoUrl;
-            a.download = `seamless-recording-${Date.now()}.webm`; 
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+        // --- NEW iOS FRIENDLY DOWNLOAD LOGIC ---
+        downloadBtn.addEventListener('click', async () => {
+            if (!finalBlob) return;
+            
+            // Determine the right extension so iOS recognizes it as a video
+            const ext = finalBlob.type.includes('mp4') ? 'mp4' : 'webm';
+            const filename = `recording-${Date.now()}.${ext}`;
+            const file = new File([finalBlob], filename, { type: finalBlob.type });
+
+            // Try to use the native iOS Share Sheet first
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                try {
+                    await navigator.share({
+                        files: [file],
+                        title: 'My Video',
+                    });
+                    statusText.innerText = "Shared successfully!";
+                } catch (error) {
+                    console.log('Share canceled or failed', error);
+                }
+            } else {
+                // Fallback for desktop browsers
+                const url = window.URL.createObjectURL(finalBlob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = filename; 
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                statusText.innerText = "Video downloaded!";
+            }
+            statusText.style.color = "#2196F3";
         });
 
         function resetUIHideTimer() {
