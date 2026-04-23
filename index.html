@@ -21,8 +21,8 @@
             height: 100%;
         }
 
-        /* Live Preview and Ghost Overlay */
-        #liveVideo, #overlayCanvas {
+        /* Live Preview for the user */
+        #liveVideo {
             position: absolute;
             top: 0;
             left: 0;
@@ -32,7 +32,21 @@
             transition: transform 0.3s ease;
         }
 
-        /* Hidden canvas used to bypass stream-stopping limitations */
+        /* Ghost frame overlay (never CSS-mirrored) */
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            opacity: 0.5;
+            display: none; 
+            pointer-events: none;
+            z-index: 5;
+        }
+
+        /* The hidden engine that drives the continuous recording */
         #recordingCanvas {
             position: absolute;
             top: 0;
@@ -40,13 +54,6 @@
             opacity: 0;
             pointer-events: none;
             z-index: -10; 
-        }
-
-        #overlayCanvas {
-            opacity: 0.5;
-            display: none; 
-            pointer-events: none;
-            z-index: 5;
         }
 
         .mirrored { transform: scaleX(-1); }
@@ -152,7 +159,10 @@
         let hideTimeout;
         let currentFacingMode = "user"; 
         
-        // Audio/Video proxy variables
+        // Track the current mirroring state of the live view
+        let isLiveViewMirrored = false; 
+
+        // Audio/Video proxy variables for gapless recording
         let audioCtx, audioDest, audioSource;
         let finalStream;
         let isDrawing = false;
@@ -174,7 +184,6 @@
                 videoElement.srcObject = stream;
 
                 // --- AUDIO PROXY SETUP ---
-                // We route the camera's audio through an AudioContext so it doesn't break when we swap cameras
                 if (!audioCtx) {
                     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                     audioDest = audioCtx.createMediaStreamDestination();
@@ -184,8 +193,6 @@
                 audioSource.connect(audioDest);
                 
                 videoElement.onloadedmetadata = () => {
-                    // Only resize canvases if we are NOT currently recording. 
-                    // Changing canvas size mid-recording breaks the WebM file.
                     if (!mediaRecorder || mediaRecorder.state === 'inactive') {
                         recordingCanvas.width = videoElement.videoWidth;
                         recordingCanvas.height = videoElement.videoHeight;
@@ -195,21 +202,20 @@
 
                     // --- VIDEO PROXY SETUP ---
                     if (!finalStream) {
-                        // Capture the video from the hidden canvas at 30FPS
                         const canvasStream = recordingCanvas.captureStream(30); 
-                        // Combine canvas video with our persistent audio destination
                         finalStream = new MediaStream([
                             canvasStream.getVideoTracks()[0],
                             audioDest.stream.getAudioTracks()[0]
                         ]);
                     }
 
+                    // Set initial mirroring based on camera type (front camera is mirrored by default)
                     if (currentFacingMode === "user") {
+                        isLiveViewMirrored = true;
                         videoElement.classList.add('mirrored');
-                        overlayCanvas.classList.add('mirrored');
                     } else {
+                        isLiveViewMirrored = false;
                         videoElement.classList.remove('mirrored');
-                        overlayCanvas.classList.remove('mirrored');
                     }
 
                     statusText.innerText = `Camera ready (${currentFacingMode === 'user' ? 'Front' : 'Rear'}).`;
@@ -221,23 +227,13 @@
         }
 
         // --- RENDER ENGINE ---
-        // Continuously copy the live camera to the hidden recording canvas
         function renderLoop() {
             if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
-                // Fill black background
                 rCtx.fillStyle = 'black';
                 rCtx.fillRect(0, 0, recordingCanvas.width, recordingCanvas.height);
                 
-                // Draw the video frame. If the UI is mirrored, we must mirror the recording canvas too.
-                if (videoElement.classList.contains('mirrored')) {
-                    rCtx.save();
-                    rCtx.translate(recordingCanvas.width, 0);
-                    rCtx.scale(-1, 1);
-                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
-                    rCtx.restore();
-                } else {
-                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
-                }
+                // Record the true orientation, ignoring live view mirroring for the final file
+                rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
             }
             requestAnimationFrame(renderLoop);
         }
@@ -251,12 +247,11 @@
         });
 
         mirrorBtn.addEventListener('click', () => {
+            isLiveViewMirrored = !isLiveViewMirrored;
             videoElement.classList.toggle('mirrored');
-            overlayCanvas.classList.toggle('mirrored');
         });
 
         startBtn.addEventListener('click', () => {
-            // Wake up audio context in case the browser suspended it
             if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
             if (finalVideoUrl) {
@@ -297,13 +292,24 @@
 
         pauseBtn.addEventListener('click', () => {
             if (mediaRecorder.state === 'recording') {
-                // Grab ghost frame to UI canvas
-                oCtx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
+                // If the live view is mirrored, we must manually flip the 
+                // captured ghost frame to match what the user is seeing.
+                if (isLiveViewMirrored) {
+                    oCtx.save();
+                    // Flip the context horizontally before drawing the frame
+                    oCtx.translate(overlayCanvas.width, 0);
+                    oCtx.scale(-1, 1);
+                    oCtx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
+                    oCtx.restore();
+                } else {
+                    oCtx.drawImage(videoElement, 0, 0, overlayCanvas.width, overlayCanvas.height);
+                }
+                
                 overlayCanvas.style.display = 'block';
                 mediaRecorder.pause();
                 
                 pauseBtn.innerText = "Resume";
-                statusText.innerText = "Paused. Switch cameras or align shot.";
+                statusText.innerText = "Paused. Align your shot.";
                 statusText.style.color = "#FFC107";
                 
             } else if (mediaRecorder.state === 'paused') {
@@ -336,7 +342,7 @@
             document.body.removeChild(a);
         });
 
-        // Auto hide UI
+        // Auto hide UI logic
         function resetUIHideTimer() {
             controlsOverlay.style.opacity = '1';
             controlsOverlay.style.pointerEvents = 'auto';
@@ -354,7 +360,7 @@
 
         // Boot up
         initCamera();
-        requestAnimationFrame(renderLoop); // Start the rendering engine
+        requestAnimationFrame(renderLoop);
         resetUIHideTimer();
     </script>
 </body>
