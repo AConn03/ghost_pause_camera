@@ -1,9 +1,10 @@
+html
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Seamless Multi-Camera Recorder</title>
+    <title>Seamless MP4 Multi-Camera Recorder</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -44,15 +45,6 @@
             z-index: 5;
         }
 
-        #recordingCanvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            opacity: 0;
-            pointer-events: none;
-            z-index: -10; 
-        }
-
         .mirrored { transform: scaleX(-1); }
 
         .controls-overlay {
@@ -62,6 +54,7 @@
             transform: translateX(-50%);
             background: rgba(0, 0, 0, 0.6);
             backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
             padding: 1.2rem;
             border-radius: 12px;
             display: flex;
@@ -113,9 +106,10 @@
 <body>
 
     <div class="video-container">
+        <!-- Playsinline is critical for iOS -->
         <video id="liveVideo" autoplay playsinline muted></video>
+        <!-- Overlay Canvas is now ONLY used for the ghosting/pause effect -->
         <canvas id="overlayCanvas"></canvas>
-        <canvas id="recordingCanvas"></canvas>
         
         <div id="controlsOverlay" class="controls-overlay">
             <div class="status" id="statusText">Camera ready.</div>
@@ -125,7 +119,7 @@
                 <button id="startBtn">Start</button>
                 <button id="pauseBtn" disabled>Pause</button>
                 <button id="stopBtn" disabled>Stop</button>
-                <button id="downloadBtn" disabled>Save Video</button>
+                <button id="downloadBtn" disabled>Save/Share</button>
             </div>
         </div>
     </div>
@@ -134,8 +128,6 @@
         const videoElement = document.getElementById('liveVideo');
         const overlayCanvas = document.getElementById('overlayCanvas');
         const oCtx = overlayCanvas.getContext('2d');
-        const recordingCanvas = document.getElementById('recordingCanvas');
-        const rCtx = recordingCanvas.getContext('2d', { willReadFrequently: true });
         
         const controlsOverlay = document.getElementById('controlsOverlay');
         const startBtn = document.getElementById('startBtn');
@@ -148,14 +140,11 @@
 
         let mediaRecorder;
         let recordedChunks = [];
-        let stream;
-        let finalBlob = null; // Storing the actual Blob now
+        let stream; // We now record the raw stream directly!
+        let finalBlob = null;
         let hideTimeout;
         let currentFacingMode = "user"; 
         let isLiveViewMirrored = false; 
-
-        let audioCtx, audioDest, audioSource;
-        let finalStream;
 
         function stopCurrentCamera() {
             if (stream) stream.getTracks().forEach(track => track.stop());
@@ -164,36 +153,18 @@
         async function initCamera() {
             stopCurrentCamera();
             try {
+                // Get the raw audio/video stream from the hardware
                 stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: currentFacingMode }, 
                     audio: true 
                 });
                 videoElement.srcObject = stream;
 
-                if (!audioCtx) {
-                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                    audioDest = audioCtx.createMediaStreamDestination();
-                }
-                if (audioSource) audioSource.disconnect();
-                audioSource = audioCtx.createMediaStreamSource(stream);
-                audioSource.connect(audioDest);
-                
                 videoElement.onloadedmetadata = () => {
-                    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-                        recordingCanvas.width = videoElement.videoWidth;
-                        recordingCanvas.height = videoElement.videoHeight;
-                        overlayCanvas.width = videoElement.videoWidth;
-                        overlayCanvas.height = videoElement.videoHeight;
-                    }
+                    overlayCanvas.width = videoElement.videoWidth;
+                    overlayCanvas.height = videoElement.videoHeight;
 
-                    if (!finalStream) {
-                        const canvasStream = recordingCanvas.captureStream(30); 
-                        finalStream = new MediaStream([
-                            canvasStream.getVideoTracks()[0],
-                            audioDest.stream.getAudioTracks()[0]
-                        ]);
-                    }
-
+                    // Automatically mirror the LIVE preview for front camera (like a real mirror)
                     if (currentFacingMode === "user") {
                         isLiveViewMirrored = true;
                         videoElement.classList.add('mirrored');
@@ -209,24 +180,6 @@
             }
         }
 
-        function renderLoop() {
-            if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
-                rCtx.fillStyle = 'black';
-                rCtx.fillRect(0, 0, recordingCanvas.width, recordingCanvas.height);
-                
-                if (isLiveViewMirrored) {
-                    rCtx.save();
-                    rCtx.translate(recordingCanvas.width, 0);
-                    rCtx.scale(-1, 1);
-                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
-                    rCtx.restore();
-                } else {
-                    rCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
-                }
-            }
-            requestAnimationFrame(renderLoop);
-        }
-
         switchCamBtn.addEventListener('click', () => {
             switchCamBtn.disabled = true;
             statusText.innerText = "Switching cameras...";
@@ -236,25 +189,38 @@
 
         mirrorBtn.addEventListener('click', () => {
             isLiveViewMirrored = !isLiveViewMirrored;
-            videoElement.classList.toggle('mirrored');
+            if (isLiveViewMirrored) {
+                videoElement.classList.add('mirrored');
+            } else {
+                videoElement.classList.remove('mirrored');
+            }
         });
 
         startBtn.addEventListener('click', () => {
-            if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
             finalBlob = null;
             recordedChunks = [];
             
-            try {
-                mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/webm; codecs=vp9' });
-            } catch (e) {
-                // iOS Safari fallback
-                mediaRecorder = new MediaRecorder(finalStream, { mimeType: 'video/mp4' }); 
+            // Ask for MP4 natively. If the browser doesn't support the string, pass nothing.
+            // iOS Safari will naturally default to MP4 when options are empty.
+            let options = {};
+            if (MediaRecorder.isTypeSupported('video/mp4')) {
+                options = { mimeType: 'video/mp4' };
             }
 
-            mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+            try {
+                mediaRecorder = new MediaRecorder(stream, options);
+            } catch (e) {
+                mediaRecorder = new MediaRecorder(stream); // Ultimate fallback
+            }
+
+            mediaRecorder.ondataavailable = (e) => { 
+                if (e.data.size > 0) recordedChunks.push(e.data); 
+            };
 
             mediaRecorder.onstop = () => {
-                finalBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+                // Determine actual mime type. Safari often leaves it blank, meaning MP4.
+                let type = mediaRecorder.mimeType || 'video/mp4';
+                finalBlob = new Blob(recordedChunks, { type: type });
                 
                 downloadBtn.disabled = false;
                 startBtn.disabled = false;
@@ -276,6 +242,8 @@
 
         pauseBtn.addEventListener('click', () => {
             if (mediaRecorder.state === 'recording') {
+                // Take a snapshot of the current frame for the "ghosting" overlay
+                oCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
                 if (isLiveViewMirrored) {
                     oCtx.save();
                     oCtx.translate(overlayCanvas.width, 0);
@@ -288,6 +256,7 @@
                 
                 overlayCanvas.style.display = 'block';
                 mediaRecorder.pause();
+                
                 pauseBtn.innerText = "Resume";
                 statusText.innerText = "Paused. Align your shot.";
                 statusText.style.color = "#FFC107";
@@ -295,6 +264,7 @@
             } else if (mediaRecorder.state === 'paused') {
                 overlayCanvas.style.display = 'none';
                 mediaRecorder.resume();
+                
                 pauseBtn.innerText = "Pause";
                 statusText.innerText = "Recording...";
                 statusText.style.color = "#4CAF50";
@@ -310,39 +280,45 @@
             stopBtn.disabled = true;
         });
 
-        // --- NEW iOS FRIENDLY DOWNLOAD LOGIC ---
         downloadBtn.addEventListener('click', async () => {
             if (!finalBlob) return;
             
-            // Determine the right extension so iOS recognizes it as a video
-            const ext = finalBlob.type.includes('mp4') ? 'mp4' : 'webm';
+            // If the blob type contains webm (Android), use webm. Otherwise, force mp4 (iOS/Safari).
+            const isWebm = finalBlob.type.includes('webm');
+            const ext = isWebm ? 'webm' : 'mp4';
+            const fileMime = isWebm ? 'video/webm' : 'video/mp4';
             const filename = `recording-${Date.now()}.${ext}`;
-            const file = new File([finalBlob], filename, { type: finalBlob.type });
+            
+            // Create a strictly typed File object for the Share Sheet
+            const file = new File([finalBlob], filename, { type: fileMime });
 
-            // Try to use the native iOS Share Sheet first
+            // 1. Try Native Mobile Share Sheet (iOS "Save to Files" or "Save Video")
             if (navigator.canShare && navigator.canShare({ files: [file] })) {
                 try {
                     await navigator.share({
                         files: [file],
-                        title: 'My Video',
+                        title: 'Video Recording',
                     });
                     statusText.innerText = "Shared successfully!";
+                    statusText.style.color = "#2196F3";
+                    return; 
                 } catch (error) {
                     console.log('Share canceled or failed', error);
                 }
-            } else {
-                // Fallback for desktop browsers
-                const url = window.URL.createObjectURL(finalBlob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = url;
-                a.download = filename; 
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                window.URL.revokeObjectURL(url);
-                statusText.innerText = "Video downloaded!";
-            }
+            } 
+            
+            // 2. Fallback to Direct Download
+            const url = window.URL.createObjectURL(file);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = filename; 
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            statusText.innerText = `Saved as ${ext.toUpperCase()}!`;
             statusText.style.color = "#2196F3";
         });
 
@@ -362,7 +338,6 @@
         window.addEventListener('touchstart', resetUIHideTimer);
 
         initCamera();
-        requestAnimationFrame(renderLoop);
         resetUIHideTimer();
     </script>
 </body>
